@@ -1,0 +1,21 @@
+{
+  "name": "harness-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A coding-agent harness built from scratch, one phase at a time.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "harness": "tsx src/cli/main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
