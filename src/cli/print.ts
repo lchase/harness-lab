@@ -11,6 +11,9 @@ export function printEvent(event: AgentEvent): void {
         `[turn ${event.turn}] tool_call ${event.name} ${event.id} ${JSON.stringify(event.arguments)}`,
       );
       return;
+    case "tool_call_update":
+      console.log(`[turn ${event.turn}] tool_status ${event.name} ${event.id} ${event.status}`);
+      return;
     case "tool_result":
       console.log(
         `[turn ${event.turn}] tool_result ${event.name} ${event.id} ${event.isError ? "error" : "ok"}`,

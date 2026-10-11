@@ -1,9 +1,10 @@
 import { pathToFileURL } from "node:url";
 import { realpathSync } from "node:fs";
 
-import { runLoop, SessionLog } from "../core/index.js";
+import { createApprovalPolicy, runLoop, SessionLog, type ApprovalPrompt } from "../core/index.js";
 import { OpenRouterProvider, type Provider } from "../provider/index.js";
 import { createAgentTools, systemPrompt } from "./agent.js";
+import { askOnStdin } from "./approve.js";
 import { HELP, parseArgs } from "./args.js";
 import { resolveConfig } from "./config.js";
 import { createDemoProvider } from "./demo.js";
@@ -13,6 +14,8 @@ import type { Message } from "../provider/types.js";
 export interface MainIO {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  /** Replaces the stdin prompt. Tests pass this so they do not block. */
+  ask?: ApprovalPrompt;
 }
 
 export async function main(argv: readonly string[], io: MainIO = {}): Promise<number> {
@@ -38,6 +41,10 @@ export async function main(argv: readonly string[], io: MainIO = {}): Promise<nu
 
   console.log(`provider=${config.provider} model=${config.model}`);
   console.log(`session=${session.path}`);
+  if (config.yolo) {
+    console.error("warning: --yolo auto-approves every tool call, including writes and bash.");
+    console.error("warning: file tools still refuse paths outside the working folder. bash is not sandboxed.");
+  }
 
   const messages: Message[] = [
     { role: "system", content: systemPrompt(config.cwd) },
@@ -54,6 +61,7 @@ export async function main(argv: readonly string[], io: MainIO = {}): Promise<nu
       maxTurns: config.maxTurns,
       timeoutMs: config.timeoutMs,
       maxOutputChars: config.maxOutputChars,
+      approve: createApprovalPolicy({ yolo: config.yolo, ask: io.ask ?? askOnStdin }),
       onEvent: printEvent,
       session,
     });

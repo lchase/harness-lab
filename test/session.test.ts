@@ -25,7 +25,7 @@ test("session header carries parentSessionId and a child_session record links th
 
     const header = records[0];
     assert.ok(header && header.type === "session");
-    assert.equal(header.version, 1);
+    assert.equal(header.version, 2);
     assert.equal(header.seq, 0);
     assert.equal(header.id, "ses_child");
     assert.equal(header.cwd, "/work");

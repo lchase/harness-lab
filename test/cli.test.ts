@@ -28,7 +28,7 @@ describe("cli", { concurrency: false }, () => {
     try {
       const { code, stdout } = await capture(() =>
         main(
-          ["--", "--provider", "fake", "--cwd", cwd, "--sessions-dir", sessions, "say hello"],
+          ["--", "--provider", "fake", "--yolo", "--cwd", cwd, "--sessions-dir", sessions, "say hello"],
           { env: {} },
         ),
       );
@@ -57,7 +57,7 @@ describe("cli", { concurrency: false }, () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "harness-cli-")));
     try {
       const { code, stdout } = await capture(() =>
-        main(["--provider", "fake", "--max-turns", "1", "--cwd", cwd, "--sessions-dir", join(cwd, "sessions"), "hello"], {
+        main(["--provider", "fake", "--yolo", "--max-turns", "1", "--cwd", cwd, "--sessions-dir", join(cwd, "sessions"), "hello"], {
           env: {},
         }),
       );
