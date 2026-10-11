@@ -1,11 +1,11 @@
 import type { Message, Provider, ToolCall } from "../provider/types.js";
 import type { Approver } from "./approval.js";
-import { allowAll } from "./approval.js";
+import { createApprovalPolicy } from "./approval.js";
 import { DEFAULT_MAX_OUTPUT_CHARS, DEFAULT_TIMEOUT_MS } from "./bash.js";
-import type { AgentEvent, EventHandler, StopReason } from "./events.js";
+import type { AgentEvent, EventHandler, StopReason, ToolCallStatus } from "./events.js";
 import type { SessionLog } from "./session.js";
-import type { Tool, ToolResult } from "./tools.js";
-import { executeTool } from "./tools.js";
+import type { Tool, ToolKind, ToolResult } from "./tools.js";
+import { executeTool, toolError } from "./tools.js";
 
 export const DEFAULT_MAX_TURNS = 8;
 
@@ -19,7 +19,11 @@ export interface LoopOptions {
   maxTurns?: number;
   timeoutMs?: number;
   maxOutputChars?: number;
-  /** Phase 1 default is `allowAll`. Phase 2 passes a real gate here. */
+  /**
+   * Defaults to a policy that auto-allows reads and denies writes and bash
+   * with "no approver configured". Pass `allowAll` in tests that should run
+   * every tool. The CLI passes a policy wired to the prompt or to `--yolo`.
+   */
   approve?: Approver;
   onEvent?: EventHandler;
   session?: SessionLog;
@@ -53,10 +57,14 @@ export async function runLoop(options: LoopOptions): Promise<LoopResult> {
     maxTurns = DEFAULT_MAX_TURNS,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
-    approve = allowAll,
     onEvent,
     session,
   } = options;
+  const approve =
+    options.approve ??
+    createApprovalPolicy({
+      ask: async () => ({ choice: "deny", reason: "no approver configured" }),
+    });
 
   if (!Number.isInteger(maxTurns) || maxTurns < 1) {
     throw new Error("maxTurns must be a positive integer.");
@@ -108,6 +116,9 @@ export async function runLoop(options: LoopOptions): Promise<LoopResult> {
     }
 
     for (const call of calls) {
+      const tool = tools.find((candidate) => candidate.schema.name === call.name);
+      const title = toolTitle(call);
+      const kind = tool?.kind ?? "other";
       emit({
         type: "tool_call",
         turn,
@@ -115,7 +126,37 @@ export async function runLoop(options: LoopOptions): Promise<LoopResult> {
         name: call.name,
         arguments: call.arguments,
       });
-      const result = await runToolCall(call, { tools, cwd, timeoutMs, maxOutputChars, approve });
+      emitStatus(emit, {
+        turn,
+        id: call.id,
+        name: call.name,
+        title,
+        kind,
+        status: "requested",
+        rawInput: call.arguments,
+      });
+
+      const result = await runToolCall(call, {
+        tools,
+        tool,
+        cwd,
+        timeoutMs,
+        maxOutputChars,
+        approve,
+        session,
+        onStatus: (status, rawOutput) => {
+          emitStatus(emit, {
+            turn,
+            id: call.id,
+            name: call.name,
+            title,
+            kind,
+            status,
+            ...(rawOutput !== undefined ? { rawOutput } : {}),
+          });
+        },
+      });
+
       const toolMessage: Message = {
         role: "tool",
         content: result.output,
@@ -143,27 +184,95 @@ export async function runLoop(options: LoopOptions): Promise<LoopResult> {
 
 interface RunToolCallOptions {
   tools: readonly Tool[];
+  tool: Tool | undefined;
   cwd: string;
   timeoutMs: number;
   maxOutputChars: number;
   approve: Approver;
+  session?: SessionLog;
+  onStatus: (status: ToolCallStatus, rawOutput?: string) => void;
 }
 
 async function runToolCall(call: ToolCall, options: RunToolCallOptions): Promise<ToolResult> {
   if (call.argumentsError) {
-    return { output: `Error: ${call.argumentsError}`, isError: true };
+    const result = toolError("invalid_arguments", call.argumentsError);
+    options.onStatus("failed", result.output);
+    return result;
+  }
+  if (!options.tool) {
+    const result = toolError("unknown_tool", `unknown tool "${call.name}".`);
+    options.onStatus("failed", result.output);
+    return result;
   }
 
-  // Approval seam. Phase 1's approver is `allowAll`. A denial comes back as a
-  // tool result so the model sees it on the next turn.
-  const decision = await options.approve({ call, cwd: options.cwd });
+  let decision;
+  try {
+    decision = await options.approve({
+      call,
+      cwd: options.cwd,
+      tool: options.tool,
+      onAwaitingApproval: () => options.onStatus("awaiting_approval"),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    decision = {
+      allowed: false as const,
+      reason: message,
+      detail: { decision: "deny" as const, source: "prompt" as const, reason: message },
+    };
+  }
+
+  options.session?.appendApproval({
+    toolCallId: call.id,
+    name: call.name,
+    ...decision.detail,
+    ...(stringArg(call, "path") ? { path: stringArg(call, "path") } : {}),
+    ...(stringArg(call, "command") ? { command: stringArg(call, "command") } : {}),
+  });
+
   if (!decision.allowed) {
-    return { output: `Error: tool call denied. ${decision.reason}`, isError: true };
+    const result = toolError("denied", `tool call denied. ${decision.reason}`);
+    options.onStatus("denied", result.output);
+    return result;
   }
 
-  return executeTool(options.tools, call, {
+  options.onStatus("running");
+  const result = await executeTool(options.tools, call, {
     cwd: options.cwd,
     timeoutMs: options.timeoutMs,
     maxOutputChars: options.maxOutputChars,
   });
+  options.onStatus(result.isError ? "failed" : "completed", result.output);
+  return result;
+}
+
+function emitStatus(
+  emit: (event: AgentEvent) => void,
+  event: {
+    turn: number;
+    id: string;
+    name: string;
+    title: string;
+    kind: ToolKind;
+    status: ToolCallStatus;
+    rawInput?: Record<string, unknown>;
+    rawOutput?: string;
+  },
+): void {
+  emit({ type: "tool_call_update", ...event });
+}
+
+function toolTitle(call: ToolCall): string {
+  const path = stringArg(call, "path");
+  if (path) return `${call.name} ${path}`;
+  const pattern = stringArg(call, "pattern");
+  if (pattern) return `${call.name} ${pattern}`;
+  const command = stringArg(call, "command");
+  if (command) return `bash ${command}`;
+  return call.name;
+}
+
+function stringArg(call: ToolCall, key: string): string | undefined {
+  const value = call.arguments[key];
+  return typeof value === "string" ? value : undefined;
 }

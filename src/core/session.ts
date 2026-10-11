@@ -10,15 +10,17 @@ import type { AgentEvent } from "./events.js";
  * flushed on every write.
  *
  * The header may carry `parentSessionId`. `appendChildSession` writes a
- * `child_session` record that points at a spawned child. The phase 1 loop
- * never spawns a child; the fields are here so subagents can be added
- * without changing the format. Replaying a log back into the loop (resume)
- * is also later. See docs/session-format.md.
+ * `child_session` record that points at a spawned child. The loop never
+ * spawns a child; the fields are here so subagents can be added without
+ * changing the format. `appendApproval` writes the decision for each tool
+ * call. New files are version 2. Replaying a log back into the loop (resume)
+ * is later. See docs/session-format.md.
  */
 
 export interface SessionHeader {
   type: "session";
-  version: 1;
+  /** 1 is the phase 1 file. 2 adds `approval` records. */
+  version: 1 | 2;
   seq: number;
   id: string;
   cwd: string;
@@ -47,9 +49,24 @@ export interface ChildSessionRecord {
   toolCallId?: string;
 }
 
-export type SessionRecord = SessionHeader | MessageRecord | EventRecord | ChildSessionRecord;
+export interface ApprovalRecord {
+  type: "approval";
+  seq: number;
+  toolCallId: string;
+  name: string;
+  decision: "allow_once" | "allow_always" | "deny";
+  source: "auto_read" | "session_rule" | "prompt" | "yolo" | "allow_all";
+  createdAt: string;
+  scope?: "read" | "tool" | "bash_prefix";
+  prefix?: string;
+  reason?: string;
+  path?: string;
+  command?: string;
+}
 
-const RECORD_TYPES = new Set(["session", "message", "event", "child_session"]);
+export type SessionRecord = SessionHeader | MessageRecord | EventRecord | ChildSessionRecord | ApprovalRecord;
+
+const RECORD_TYPES = new Set(["session", "message", "event", "child_session", "approval"]);
 
 export interface CreateSessionOptions {
   cwd: string;
@@ -84,7 +101,7 @@ export class SessionLog {
     try {
       log.writeLine({
         type: "session",
-        version: 1,
+        version: 2,
         seq: log.nextSeq(),
         id,
         cwd: init.cwd,
@@ -106,6 +123,15 @@ export class SessionLog {
 
   appendEvent(event: AgentEvent): void {
     this.writeLine({ type: "event", seq: this.nextSeq(), event });
+  }
+
+  appendApproval(detail: Omit<ApprovalRecord, "type" | "seq" | "createdAt">): void {
+    this.writeLine({
+      type: "approval",
+      seq: this.nextSeq(),
+      createdAt: new Date().toISOString(),
+      ...detail,
+    });
   }
 
   /**
@@ -186,7 +212,7 @@ export function readSession(path: string): SessionRecord[] {
   if (!header || header.type !== "session") {
     throw new Error(`${path}: first record must be a session header`);
   }
-  if (header.version !== 1) {
+  if (header.version !== 1 && header.version !== 2) {
     throw new Error(`${path}: unsupported session version ${String(header.version)}`);
   }
   return records;

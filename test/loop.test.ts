@@ -48,6 +48,7 @@ test("runs several tool turns and then stops when the model is done", async () =
       tools: [bashTool],
       cwd,
       maxTurns: 6,
+      approve: allowAll,
       onEvent: collect(events),
     });
 
@@ -59,10 +60,16 @@ test("runs several tool turns and then stops when the model is done", async () =
       [
         "assistant_text",
         "tool_call",
+        "tool_call_update",
+        "tool_call_update",
+        "tool_call_update",
         "tool_result",
         "turn_end",
         "assistant_text",
         "tool_call",
+        "tool_call_update",
+        "tool_call_update",
+        "tool_call_update",
         "tool_result",
         "turn_end",
         "assistant_text",
@@ -122,6 +129,7 @@ test("runs every tool call in one reply before the next model call", async () =>
       tools: [bashTool],
       cwd,
       maxTurns: 4,
+      approve: allowAll,
     });
 
     assert.equal(result.stopReason, "completed");
@@ -148,6 +156,7 @@ test("stops with max_turns and does not call the model again", async () => {
       tools: [bashTool],
       cwd,
       maxTurns: 2,
+      approve: allowAll,
       onEvent: collect(events),
     });
 
@@ -186,6 +195,7 @@ test("a failing command is returned to the model as a tool result", async () => 
       messages: [{ role: "user", content: "break" }],
       tools: [bashTool],
       cwd,
+      approve: allowAll,
       onEvent: collect(events),
     });
 
@@ -203,6 +213,8 @@ test("a failing command is returned to the model as a tool result", async () => 
 
 test("a tool that throws is fed back as a result and does not escape the loop", async () => {
   const boom: Tool = {
+    access: "execute",
+    kind: "other",
     schema: {
       name: "boom",
       description: "Always throws.",
@@ -228,6 +240,7 @@ test("a tool that throws is fed back as a result and does not escape the loop", 
     messages: [{ role: "user", content: "go" }],
     tools: [boom],
     cwd: tmpdir(),
+    approve: allowAll,
   });
 
   assert.equal(result.stopReason, "completed");
@@ -255,6 +268,7 @@ test("an unknown tool and malformed arguments become tool results", async () => 
     messages: [{ role: "user", content: "go" }],
     tools: [bashTool],
     cwd: tmpdir(),
+    approve: allowAll,
   });
 
   assert.equal(result.stopReason, "completed");
@@ -279,7 +293,11 @@ test("a denied tool call is a tool result", async () => {
     messages: [{ role: "user", content: "go" }],
     tools: [bashTool],
     cwd: tmpdir(),
-    approve: () => ({ allowed: false, reason: "phase 2 will ask first" }),
+    approve: () => ({
+      allowed: false,
+      reason: "phase 2 will ask first",
+      detail: { decision: "deny", source: "prompt", reason: "phase 2 will ask first" },
+    }),
   });
 
   assert.equal(result.stopReason, "completed");
@@ -331,6 +349,7 @@ test("writes a session log and does not emit a child session", async () => {
       ],
       tools: [bashTool],
       cwd,
+      approve: allowAll,
       session,
     });
     session.close();
@@ -338,7 +357,7 @@ test("writes a session log and does not emit a child session", async () => {
     const records = readSession(session.path);
     const header = records[0];
     assert.ok(header && header.type === "session");
-    assert.equal(header.version, 1);
+      assert.equal(header.version, 2);
     assert.equal(header.model, "test-model");
     assert.equal(header.cwd, cwd);
     assert.equal(header.parentSessionId, undefined);

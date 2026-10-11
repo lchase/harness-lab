@@ -15,6 +15,7 @@ export interface ResolvedConfig {
   sessionsDir: string;
   timeoutMs: number;
   maxOutputChars: number;
+  yolo: boolean;
   apiKey?: string;
   baseUrl?: string;
 }
@@ -51,6 +52,7 @@ export function resolveConfig(
     sessionsDir,
     timeoutMs: args.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxOutputChars: args.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
+    yolo: args.yolo,
     ...(apiKey ? { apiKey } : {}),
     ...(baseUrl ? { baseUrl } : {}),
   };

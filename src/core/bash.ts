@@ -1,16 +1,19 @@
 import { spawn } from "node:child_process";
 
-import type { Tool, ToolContext, ToolResult } from "./tools.js";
+import { toolError, toolOk, type Tool, type ToolContext, type ToolResult } from "./tools.js";
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_OUTPUT_CHARS = 16_000;
 
 export const bashTool: Tool = {
+  access: "execute",
+  kind: "execute",
   schema: {
     name: "bash",
     description:
-      "Run a bash command in the working directory. stdout and stderr are combined. " +
-      "The command is killed if it runs too long or writes too much.",
+      "Run a bash command with cwd set to the working directory. stdout and stderr are combined. " +
+      "The command is killed if it runs too long or writes too much. " +
+      "bash is not sandboxed: it can read and write outside the working directory. File tools cannot. Sandboxing is a later phase.",
     parameters: {
       type: "object",
       properties: {
@@ -36,10 +39,7 @@ export const bashTool: Tool = {
 export function runBash(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const command = args.command;
   if (typeof command !== "string" || command.trim().length === 0) {
-    return Promise.resolve({
-      output: 'Error: bash requires a non-empty string argument "command".',
-      isError: true,
-    });
+    return Promise.resolve(toolError("invalid_arguments", 'bash requires a non-empty string argument "command".'));
   }
 
   return new Promise((resolve) => {
@@ -77,7 +77,7 @@ export function runBash(args: Record<string, unknown>, ctx: ToolContext): Promis
 
     if (!child.stdout || !child.stderr) {
       kill();
-      finish({ output: "Error: failed to capture command output.", isError: true });
+      finish(toolError("io_error", "failed to capture command output."));
       return;
     }
 
@@ -104,7 +104,7 @@ export function runBash(args: Record<string, unknown>, ctx: ToolContext): Promis
 
     child.on("error", (err) => {
       if (timedOut || truncated) return;
-      finish({ output: `Error: ${err.message}`, isError: true });
+      finish(toolError("io_error", err.message));
     });
 
     child.on("close", (code, signal) => {
@@ -113,21 +113,19 @@ export function runBash(args: Record<string, unknown>, ctx: ToolContext): Promis
         text += `\n[output truncated to ${ctx.maxOutputChars} characters]`;
       }
       if (timedOut) {
-        text += `\nError: command timed out after ${ctx.timeoutMs}ms`;
-        finish({ output: text, isError: true });
+        finish(toolError("timeout", `command timed out after ${ctx.timeoutMs}ms`, text));
         return;
       }
       if (truncated) {
-        finish({ output: text.length > 0 ? text : "(no output)", isError: false });
+        finish(toolOk(text.length > 0 ? text : "(no output)"));
         return;
       }
       if (code !== 0) {
         const signalNote = signal ? `, signal ${signal}` : "";
-        text += `\n[exit code ${code ?? "null"}${signalNote}]`;
-        finish({ output: text, isError: true });
+        finish(toolError("command_failed", `exit code ${code ?? "null"}${signalNote}`, text));
         return;
       }
-      finish({ output: text.length > 0 ? text : "(no output)", isError: false });
+      finish(toolOk(text.length > 0 ? text : "(no output)"));
     });
   });
 }

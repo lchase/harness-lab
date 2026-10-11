@@ -8,6 +8,7 @@ export interface CliArgs {
   sessionsDir?: string;
   timeoutMs?: number;
   maxOutputChars?: number;
+  yolo: boolean;
 }
 
 export const HELP = `harness — one-shot coding agent loop
@@ -24,6 +25,7 @@ Options:
   --sessions-dir <dir>         Directory for JSONL session logs (default: ./sessions)
   --timeout <ms>               Bash timeout in milliseconds (default: 30000)
   --max-output <chars>         Bash output cap (default: 16000)
+  --yolo                       Auto-approve every tool call. Prints a warning.
   -h, --help
 
 Environment:
@@ -42,7 +44,7 @@ The fake provider runs a built-in script and does not call a model.
 `;
 
 export function parseArgs(argv: readonly string[]): CliArgs {
-  const args: CliArgs = { help: false };
+  const args: CliArgs = { help: false, yolo: false };
   const positional: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -83,6 +85,10 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     }
     if (arg === "--max-output") {
       args.maxOutputChars = takePositiveInt(argv, ++i, "--max-output");
+      continue;
+    }
+    if (arg === "--yolo") {
+      args.yolo = true;
       continue;
     }
     if (arg.startsWith("-")) {

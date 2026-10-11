@@ -59,7 +59,7 @@ A command can fail because the path is missing, the exit code is non-zero, the p
 
 `provider_error` is the other kind of failure. The model API itself failed, so there is no assistant message to continue from.
 
-There is a related seam for phase 2. Before a tool runs, `runToolCall` asks an approver. Phase 1 passes `allowAll`, which always allows. A denial is also a tool result (`Error: tool call denied. …`), so the model can read it. Phase 2 replaces the approver. The loop already knows what to do with a "no."
+Before a tool runs, `runToolCall` asks an approver. A denial is a tool result (`Error (denied): tool call denied. …`), so the model can read it. Tests that want every tool to run pass `allowAll`. If you omit `approve`, reads are allowed and writes and bash are denied with "no approver configured". The CLI asks on stdin, or skips the question with `--yolo`. [Phase 2](02-tools-and-guardrails.md) is that policy. The loop already knew what to do with a "no."
 
 ## Diagram
 
@@ -69,7 +69,7 @@ flowchart TD
   loop --> call["provider.complete"]
   call --> decision{"tool calls in the reply?"}
   decision -->|none| done["stop: completed"]
-  decision -->|yes| gate["approve — allowAll in phase 1"]
+  decision -->|yes| gate["approve — policy, or allowAll in tests"]
   gate -->|allowed| bash["runBash in cwd"]
   gate -->|denied| result["append tool message"]
   bash --> result
@@ -128,13 +128,13 @@ The HTTP JSON also includes a `usage` object with token counts. `fromWireMessage
 
 ### Events
 
-`src/core/events.ts` defines `AgentEvent`. Five types: `assistant_text`, `tool_call`, `tool_result`, `turn_end`, `stop`. `StopReason` is `completed`, `max_turns`, or `provider_error`. `EventHandler` is the callback the CLI passes as `onEvent`.
+`src/core/events.ts` defines `AgentEvent`. The original five are `assistant_text`, `tool_call`, `tool_result`, `turn_end`, and `stop`. Phase 2 adds `tool_call_update` for the status of one call. `StopReason` is `completed`, `max_turns`, or `provider_error`. `EventHandler` is the callback the CLI passes as `onEvent`.
 
 `printEvent` in `src/cli/print.ts` is a switch on `event.type`. The default branch is typed as `never`, so adding an event type without updating the CLI is a type error. That is the point of emitting events from the core: every frontend matches on the same set.
 
 ### The approval seam
 
-`src/core/approval.ts` exports `Approver`, `ApprovalDecision`, and `allowAll`. Read the comment at the top of the file. `allowAll` returns `{ allowed: true }`. The loop's default argument is `approve = allowAll`. A later phase passes a different function into `runLoop`. You can see the deny path today in `runToolCall`, and `test/loop.test.ts` covers it.
+`src/core/approval.ts` exports `Approver`, `ApprovalDecision`, `allowAll`, and `createApprovalPolicy`. Read the comment at the top of the file. `allowAll` returns an allow decision. Tests pass it when they want every tool to run. `runLoop`, when you omit `approve`, uses a policy that auto-allows reads and denies writes and bash. The CLI passes `createApprovalPolicy` wired to the stdin prompt, or to `--yolo`. The deny path is `runToolCall`, covered by `test/loop.test.ts`. The policy itself is [phase 2](02-tools-and-guardrails.md).
 
 ### Tools
 
@@ -142,13 +142,13 @@ The HTTP JSON also includes a `usage` object with token counts. `fromWireMessage
 
 `bashTool` and `runBash` are in `src/core/bash.ts`. `runBash` checks that `command` is a non-empty string, then spawns `bash -lc` with `cwd` set to `ctx.cwd`. The child is its own process group so a timeout can kill the pipeline, not only the shell. Stdout and stderr share one buffer. Past `maxOutputChars`, the process is killed and a truncation note is appended. Past `timeoutMs`, the result says the command timed out. A non-zero exit appends `[exit code N]`. All of those resolve the promise. None of them reject it.
 
-The app decides the tool list. `createAgentTools` in `src/cli/agent.ts` returns `[bashTool]`. The loop does not mention bash by name.
+The app decides the tool list. `createAgentTools` in `src/cli/agent.ts` registers the tools and returns them. Phase 1 registered only `bashTool`. Phase 2 registers read, write, edit, glob, and bash. The loop does not mention those names.
 
 ### The session log
 
 `SessionLog` in `src/core/session.ts` appends one JSON object per line and `fsync`s it. `create` writes the header: `version`, `id`, `cwd`, `model`, `createdAt`, and `parentSessionId` when you pass one. `appendMessage` and `appendEvent` are what the loop calls. `appendChildSession` writes a `child_session` record that points at a child id. Search the repo: `runLoop` does not call it. Phase 5 will.
 
-`readSession` parses the file and rejects a missing header, an unknown record type, or a version other than 1. The field list, and how parent and child point at each other, is [docs/session-format.md](../docs/session-format.md).
+`readSession` parses the file and rejects a missing header, an unknown record type, or a version other than 1 or 2. New files are version 2, which adds `approval` records. Version 1 files still parse. The field list, and how parent and child point at each other, is [docs/session-format.md](../docs/session-format.md).
 
 Message records are the transcript the model saw. Event records are what a UI would replay. Both are stored.
 
@@ -168,7 +168,7 @@ The turn loop is `for (let turn = 1; turn <= maxTurns; turn++)`:
 
 If the `for` loop ends, every allowed turn asked for tools. Emit `stop` with `max_turns`.
 
-`runToolCall` is the function under the loop. If `argumentsError` is set, it returns an error result and does not run the tool. Otherwise it `await`s `approve`. A denial becomes `Error: tool call denied. …`. An approval calls `executeTool`.
+`runToolCall` is the function under the loop. If `argumentsError` is set, or the tool name is unknown, it returns an error result and does not ask for approval. Otherwise it `await`s `approve`. A denial becomes `Error (denied): tool call denied. …`. An approval calls `executeTool`. Each call also emits `tool_call_update` events (`requested`, then approval, `running`, and `completed`, `failed`, or `denied`). Phase 2 walks through those.
 
 `messages` is mutated. The returned `LoopResult` has `stopReason`, `turns` (model calls that returned), and the same array.
 
@@ -182,13 +182,13 @@ If the `for` loop ends, every allowed turn asked for tools. Emit `stop` with `ma
 
 ### One prompt, end to end
 
-`pnpm harness --provider fake "say hello"` does this:
+`pnpm harness --provider fake --yolo "say hello"` does this:
 
 1. `main` writes a system message and `{ role: "user", content: "say hello" }`.
 2. `runLoop` logs those two messages, then calls the fake provider.
-3. Step 1 of the demo returns an assistant message with one `bash` call. The loop emits the text and the tool call, runs `printf` in the working directory, and appends the tool result `hello from harness`.
+3. Step 1 of the demo returns an assistant message with one `bash` call. `--yolo` approves it without a question. The loop emits the text, the tool call, and the status updates, runs `printf` in the working directory, and appends the tool result `hello from harness`.
 4. Step 2 of the demo reads that tool message and returns text starting with `Done.` No tool calls, so the loop stops with `completed`.
-5. `printEvent` has printed each event. The JSONL file has the header, every message, and every event.
+5. `printEvent` has printed each event. The JSONL file has the header, every message, every event, and an `approval` record for the bash call.
 
 The fake model did not read your prompt in order to choose an action. The second step pastes the prompt into its reply. A real OpenRouter model chooses the command.
 
@@ -202,19 +202,24 @@ pnpm typecheck
 pnpm test
 ```
 
-Fake provider, no API key:
+Fake provider, no API key. `--yolo` approves the demo's `bash` call so the process does not wait on stdin. Without it, the CLI prints `Approval needed: bash` and waits for `y`.
 
 ```sh
-pnpm harness --provider fake "say hello"
+pnpm harness --provider fake --yolo "say hello"
 ```
 
-You should see lines in this shape. The session id will differ.
+You should see lines in this shape. The session id will differ. The two warning lines go to stderr.
 
 ```
 provider=fake model=openai/gpt-4o-mini
 session=/workspace/sessions/ses_….jsonl
+warning: --yolo auto-approves every tool call, including writes and bash.
+warning: file tools still refuse paths outside the working folder. bash is not sandboxed.
 [turn 1] assistant: I'll run a command in the working directory.
 [turn 1] tool_call bash call_demo {"command":"printf 'hello from harness\\n'"}
+[turn 1] tool_status bash call_demo requested
+[turn 1] tool_status bash call_demo running
+[turn 1] tool_status bash call_demo completed
 [turn 1] tool_result bash call_demo ok
 hello from harness
 [turn 1] turn_end tools=yes
@@ -233,6 +238,8 @@ export OPENROUTER_API_KEY=sk-or-...
 pnpm harness "list the files in this directory and summarize them"
 ```
 
+Writes and bash wait for `y`, `a`, `p`, or `n` on stdin. `--yolo` approves them and prints a warning. File tools still refuse paths outside the working directory.
+
 To try another model, including Grok, set the id OpenRouter publishes:
 
 ```sh
@@ -250,7 +257,7 @@ Do these in a scratch branch or revert them before you commit. `pnpm test` shoul
 Run:
 
 ```sh
-pnpm harness --provider fake --max-turns 1 "say hello"
+pnpm harness --provider fake --yolo --max-turns 1 "say hello"
 ```
 
 The tool still runs, because the cap is checked after the tools of that turn. The stop line is `max_turns`, the `Done.` reply is absent, and the process exits 1.
@@ -259,13 +266,15 @@ In `runLoop`, find `for (let turn = 1; turn <= maxTurns; turn++)` and `DEFAULT_M
 
 ### 2. Feed an error back
 
-In `createDemoProvider` (`src/cli/demo.ts`), change the bash command to `ls /no/such/harness-path`. Run the fake CLI again.
+In `createDemoProvider` (`src/cli/demo.ts`), change the bash command to `ls /no/such/harness-path`. Run `pnpm harness --provider fake --yolo "say hello"` again.
 
 You should see `tool_result` marked `error`, with the shell's message and an exit code, and the following assistant text should contain that same output. The process still exits 0, because the script's second step does not ask for another tool.
 
 That path is `runBash` (non-zero exit) → `runToolCall` → a tool message on the next `complete` call. The test named "a failing command is returned to the model as a tool result" in `test/loop.test.ts` locks the same behavior. Revert `demo.ts` when you are finished.
 
 ### 3. Add a `read_file` tool
+
+Phase 2 already ships `read_file`, with a workspace check this sketch left out. Read `src/core/read-file.ts` and compare it to the sketch. If you want to build it yourself, do that on a copy of the phase 1 tree.
 
 Add `src/core/read-file.ts` that exports a `Tool`, following `bashTool`.
 
@@ -286,7 +295,7 @@ Add an optional `usage` field on `ProviderResponse`. Copy it out in `OpenRouterP
 
 ### 5. Read the session file
 
-Run the fake CLI once. Pretty-print the JSONL (each line is one object).
+Run `pnpm harness --provider fake --yolo "say hello"` once. Pretty-print the JSONL (each line is one object).
 
 - Find the header and confirm `version`, `id`, `cwd`, `model`, and `createdAt`.
 - Find the tool message and the `tool_result` event that share `call_demo`. Why are both stored?
@@ -296,7 +305,7 @@ Then open `appendChildSession` and [docs/session-format.md](../docs/session-form
 
 ## What's next
 
-Phase 2 is tools and guardrails. You will add read, write, and edit next to bash, refuse paths that escape the working folder, and replace `allowAll` with a real check. `runToolCall` already turns a denial into a tool result. Phase 2 decides when to deny.
+Phase 2 is tools and guardrails: read, write, edit, and glob next to bash, a workspace boundary, and a real approval policy. The lesson is [02-tools-and-guardrails.md](02-tools-and-guardrails.md). `runToolCall` already turns a denial into a tool result.
 
 Streaming, the TUI, and the local server are phase 3. Resume and `AGENTS.md` are phase 4. `appendChildSession` is unused until phase 5.
 
